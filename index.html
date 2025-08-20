@@ -1,0 +1,653 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Ghibli-Style Pac Adventure</title>
+  <meta name="description" content="A single-level, Ghibli-vibe Pacman-style game in React." />
+  <!-- Tailwind via CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    html, body { height: 100%; }
+    canvas { image-rendering: pixelated; }
+  </style>
+  <!-- React + ReactDOM (UMD) -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <!-- Babel to transpile JSX in the browser -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body class="min-h-screen">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useEffect, useRef, useState } = React;
+
+    // ====== Config ======
+    const TILE = 24; // base tile size (px)
+    const COLS = 21; // maze width in tiles (odd is nicer for symmetry)
+    const ROWS = 23; // maze height in tiles
+    const CANVAS_W = COLS * TILE;
+    const CANVAS_H = ROWS * TILE;
+
+    // Colors (soft Ghibli-inspired)
+    const COLORS = {
+      bg: "#f3f7ff",
+      canvasBg: "#eaf1ff",
+      wall: "#7aa2f7",
+      wallShadow: "#5b82d6",
+      pellet: "#ffd89c",
+      powerPellet: "#ffbcbc",
+      pacman: "#ffd35a",
+      pacmanShadow: "#e0b03e",
+      ghostRed: "#ff8b8b",
+      ghostPink: "#ffb6d9",
+      ghostCyan: "#8be1ff",
+      ghostOrange: "#ffc58b",
+      ghostEye: "#f7faff",
+      ghostPupil: "#2b2d42",
+      frightened: "#658fff",
+      text: "#1f2937",
+      ui: "#ffffff",
+      uiBorder: "#e5e7eb",
+    };
+
+    // Simple single-level map
+    // 0 = wall, 1 = pellet, 2 = empty path, 3 = power pellet
+    const LEVEL = [
+      "000000000000000000000",
+      "011111111011111111110",
+      "010000001010100000010",
+      "031110111010111011130",
+      "010010000000000010010",
+      "011010111111111010110",
+      "010010100000001010010",
+      "011110101111101011110",
+      "000010101000101010000",
+      "111110101011101011111",
+      "000010100022001010000",
+      "111110101011101011111",
+      "000010101000101010000",
+      "011110101111101011110",
+      "010010100000001010010",
+      "011010111111111010110",
+      "010010000000000010010",
+      "031110111010111011130",
+      "010000001010100000010",
+      "011111111011111111110",
+      "000000000200000000000",
+      "011111111011111111110",
+      "000000000000000000000",
+    ];
+
+    // Convert string rows to grid numbers
+    const GRID = LEVEL.map((row) => row.split("").map((c) => parseInt(c, 10)));
+
+    // Helpers
+    const isWall = (c, r) => GRID[r] && GRID[r][c] === 0;
+    const isPellet = (c, r) => GRID[r] && GRID[r][c] === 1;
+    const isPowerPellet = (c, r) => GRID[r] && GRID[r][c] === 3;
+    const isPath = (c, r) => GRID[r] && (GRID[r][c] === 1 || GRID[r][c] === 2 || GRID[r][c] === 3);
+
+    // Directions
+    const DIRS = {
+      left: { x: -1, y: 0 },
+      right: { x: 1, y: 0 },
+      up: { x: 0, y: -1 },
+      down: { x: 0, y: 1 },
+    };
+    const DIR_KEYS = {
+      ArrowLeft: "left",
+      ArrowRight: "right",
+      ArrowUp: "up",
+      ArrowDown: "down",
+    };
+
+    // Ghost templates
+    const GHOSTS_DEF = [
+      { name: "Akai", color: COLORS.ghostRed, home: { c: 10, r: 10 } },
+      { name: "Momo", color: COLORS.ghostPink, home: { c: 10, r: 12 } },
+      { name: "Aoi", color: COLORS.ghostCyan, home: { c: 9, r: 11 } },
+      { name: "Kabo", color: COLORS.ghostOrange, home: { c: 11, r: 11 } },
+    ];
+
+    // Storage keys
+    const SCORE_KEY = "ghibliPacScores";
+    const NAME_KEY = "ghibliPacPlayerName";
+
+    function useLocalStorage(key, initial) {
+      const [value, setValue] = useState(() => {
+        try {
+          const v = localStorage.getItem(key);
+          return v ? JSON.parse(v) : initial;
+        } catch {
+          return initial;
+        }
+      });
+      useEffect(() => {
+        try {
+          localStorage.setItem(key, JSON.stringify(value));
+        } catch {}
+      }, [key, value]);
+      return [value, setValue];
+    }
+
+    function drawRoundedRect(ctx, x, y, w, h, r) {
+      const rr = Math.min(r, w / 2, h / 2);
+      ctx.beginPath();
+      ctx.moveTo(x + rr, y);
+      ctx.arcTo(x + w, y, x + w, y + h, rr);
+      ctx.arcTo(x + w, y + h, x, y + h, rr);
+      ctx.arcTo(x, y + h, x, y, rr);
+      ctx.arcTo(x, y, x + w, y, rr);
+      ctx.closePath();
+    }
+
+    function drawGhost(ctx, x, y, size, color, frightened = false) {
+      const r = size / 2;
+      const base = frightened ? COLORS.frightened : color;
+      // Body
+      ctx.fillStyle = base;
+      ctx.beginPath();
+      ctx.moveTo(x - r, y);
+      ctx.quadraticCurveTo(x - r, y - r, x, y - r);
+      ctx.quadraticCurveTo(x + r, y - r, x + r, y);
+      ctx.lineTo(x + r, y + r - 4);
+      for (let i = 0; i < 4; i++) {
+        ctx.quadraticCurveTo(x + r - (i * (r / 2)), y + r, x + r - (i * (r / 2)) - r / 4, y + r - 4);
+      }
+      ctx.lineTo(x - r, y);
+      ctx.fill();
+      // Eyes
+      ctx.fillStyle = COLORS.ghostEye;
+      ctx.beginPath();
+      ctx.arc(x - r / 3, y - r / 4, r / 5, 0, Math.PI * 2);
+      ctx.arc(x + r / 3, y - r / 4, r / 5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = COLORS.ghostPupil;
+      ctx.beginPath();
+      ctx.arc(x - r / 3, y - r / 4, r / 9, 0, Math.PI * 2);
+      ctx.arc(x + r / 3, y - r / 4, r / 9, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    function drawPacman(ctx, x, y, size, dir, t) {
+      const r = size / 2;
+      const mouth = (Math.sin(t * 10) * 0.25 + 0.35) * Math.PI;
+      let start, end;
+      switch (dir) {
+        case "left":
+          start = Math.PI + mouth;
+          end = Math.PI - mouth;
+          break;
+        case "right":
+          start = mouth;
+          end = -mouth;
+          break;
+        case "up":
+          start = -Math.PI / 2 + mouth;
+          end = -Math.PI / 2 - mouth;
+          break;
+        case "down":
+          start = Math.PI / 2 + mouth;
+          end = Math.PI / 2 - mouth;
+          break;
+        default:
+          start = mouth;
+          end = -mouth;
+      }
+      // Shadow
+      ctx.fillStyle = COLORS.pacmanShadow;
+      ctx.beginPath();
+      ctx.arc(x + 2, y + 2, r, 0, Math.PI * 2);
+      ctx.fill();
+      // Body
+      ctx.fillStyle = COLORS.pacman;
+      ctx.beginPath();
+      ctx.moveTo(x, y);
+      ctx.arc(x, y, r, start, Math.PI * 2 + end, false);
+      ctx.closePath();
+      ctx.fill();
+    }
+
+    function drawMaze(ctx) {
+      ctx.fillStyle = COLORS.canvasBg;
+      ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+      // soft vignette
+      const grad = ctx.createRadialGradient(CANVAS_W / 2, CANVAS_H / 2, 10, CANVAS_W / 2, CANVAS_H / 2, CANVAS_W / 1.1);
+      grad.addColorStop(0, "rgba(255,255,255,0)");
+      grad.addColorStop(1, "rgba(90,120,200,0.12)");
+      ctx.fillStyle = grad;
+      ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+
+      // Walls
+      for (let r = 0; r < ROWS; r++) {
+        for (let c = 0; c < COLS; c++) {
+          if (GRID[r][c] === 0) {
+            const x = c * TILE;
+            const y = r * TILE;
+            // shadow
+            ctx.fillStyle = COLORS.wallShadow;
+            drawRoundedRect(ctx, x + 2, y + 3, TILE - 4, TILE - 6, 10);
+            ctx.fill();
+            // wall
+            ctx.fillStyle = COLORS.wall;
+            drawRoundedRect(ctx, x + 1, y + 1, TILE - 6, TILE - 6, 9);
+            ctx.fill();
+          }
+        }
+      }
+    }
+
+    function countPelletsLeft() {
+      let count = 0;
+      for (let r = 0; r < ROWS; r++) {
+        for (let c = 0; c < COLS; c++) {
+          if (GRID[r][c] === 1 || GRID[r][c] === 3) count++;
+        }
+      }
+      return count;
+    }
+
+    function canMove(nx, ny) {
+      const c = Math.floor(nx / TILE);
+      const r = Math.floor(ny / TILE);
+      return isPath(c, r);
+    }
+
+    function wrapX(x) {
+      if (x < 0) return CANVAS_W - 1;
+      if (x >= CANVAS_W) return 0;
+      return x;
+    }
+
+    function App() {
+      const canvasRef = useRef(null);
+      const [running, setRunning] = useState(true);
+      const [score, setScore] = useState(0);
+      const [levelOver, setLevelOver] = useState(false);
+      const [message, setMessage] = useState("");
+      const [playerName, setPlayerName] = useLocalStorage(NAME_KEY, "");
+      const [scores, setScores] = useLocalStorage(SCORE_KEY, []);
+      const [showNameModal, setShowNameModal] = useState(false);
+
+      const stateRef = useRef({
+        pac: {
+          x: 10 * TILE + TILE / 2,
+          y: 20 * TILE + TILE / 2,
+          dir: "left",
+          nextDir: "left",
+          speed: 2,
+        },
+        ghosts: [],
+        t: 0,
+        frightenedUntil: 0,
+      });
+
+      // Init ghosts
+      useEffect(() => {
+        stateRef.current.ghosts = GHOSTS_DEF.map((g, i) => ({
+          ...g,
+          x: g.home.c * TILE + TILE / 2,
+          y: g.home.r * TILE + TILE / 2,
+          dir: i % 2 === 0 ? "left" : "right",
+          speed: 1.6,
+          eaten: false,
+        }));
+      }, []);
+
+      // Name handling on mount
+      useEffect(() => {
+        if (!playerName || playerName.trim().length < 1) {
+          setShowNameModal(true);
+        }
+      }, []); // eslint-disable-line
+
+      // Controls
+      useEffect(() => {
+        const onKey = (e) => {
+          if (DIR_KEYS[e.key]) {
+            e.preventDefault();
+            stateRef.current.pac.nextDir = DIR_KEYS[e.key];
+          }
+          if (e.key === " ") {
+            setRunning((r) => !r);
+          }
+        };
+        window.addEventListener("keydown", onKey, { passive: false });
+        return () => window.removeEventListener("keydown", onKey);
+      }, []);
+
+      // Game loop
+      useEffect(() => {
+        const canvas = canvasRef.current;
+        const ctx = canvas.getContext("2d");
+
+        let raf;
+        function loop() {
+          if (!running || levelOver) {
+            raf = requestAnimationFrame(loop);
+            return;
+          }
+          const st = stateRef.current;
+          st.t += 0.016;
+
+          // Pac movement
+          const p = st.pac;
+          // try turning into nextDir if possible (grid-aligned)
+          const gridAligned = Math.abs((p.x - TILE / 2) % TILE) < 1 && Math.abs((p.y - TILE / 2) % TILE) < 1;
+          if (gridAligned) {
+            const nd = DIRS[p.nextDir];
+            const nx = p.x + nd.x * p.speed;
+            const ny = p.y + nd.y * p.speed;
+            if (canMove(nx, ny)) {
+              p.dir = p.nextDir;
+            }
+          }
+          const d = DIRS[p.dir];
+          let nx = p.x + d.x * p.speed;
+          let ny = p.y + d.y * p.speed;
+          if (canMove(nx, ny)) {
+            p.x = wrapX(nx);
+            p.y = ny;
+          }
+
+          // Pellet eating
+          const pc = Math.floor(p.x / TILE);
+          const pr = Math.floor(p.y / TILE);
+          if (isPellet(pc, pr)) {
+            GRID[pr][pc] = 2; // eat
+            setScore((s) => s + 10);
+          } else if (isPowerPellet(pc, pr)) {
+            GRID[pr][pc] = 2;
+            setScore((s) => s + 50);
+            stateRef.current.frightenedUntil = performance.now() + 7000; // 7s
+          }
+
+          // Ghost logic (simple: bias towards pacman occasionally, else random at intersections)
+          const frightened = performance.now() < stateRef.current.frightenedUntil;
+          for (const g of st.ghosts) {
+            if (g.eaten) {
+              // return to home
+              const hx = g.home.c * TILE + TILE / 2;
+              const hy = g.home.r * TILE + TILE / 2;
+              const dx = hx - g.x;
+              const dy = hy - g.y;
+              const len = Math.hypot(dx, dy) || 1;
+              g.x += (dx / len) * (g.speed + 0.2);
+              g.y += (dy / len) * (g.speed + 0.2);
+              if (Math.hypot(dx, dy) < 4) g.eaten = false;
+            } else {
+              // decide direction at grid centers
+              const ga = Math.abs((g.x - TILE / 2) % TILE) < 1 && Math.abs((g.y - TILE / 2) % TILE) < 1;
+              if (ga) {
+                const opts = [];
+                for (const [name, v] of Object.entries(DIRS)) {
+                  const tx = g.x + v.x * TILE;
+                  const ty = g.y + v.y * TILE;
+                  if (canMove(tx, ty)) opts.push(name);
+                }
+                // disallow reversing too often
+                const reverse = { left: "right", right: "left", up: "down", down: "up" };
+                const filtered = opts.filter((o) => o !== reverse[g.dir]);
+                let choice = filtered.length ? filtered : opts;
+
+                if (!frightened && Math.random() < 0.7) {
+                  // choose direction that reduces distance to Pac
+                  let best = choice[0];
+                  let bestD = Infinity;
+                  for (const o of choice) {
+                    const v = DIRS[o];
+                    const tx = g.x + v.x * TILE;
+                    const ty = g.y + v.y * TILE;
+                    const dist = Math.hypot(tx - p.x, ty - p.y);
+                    if (dist < bestD) {
+                      bestD = dist;
+                      best = o;
+                    }
+                  }
+                  g.dir = best;
+                } else {
+                  g.dir = choice[Math.floor(Math.random() * choice.length)] || g.dir;
+                }
+              }
+              const gv = DIRS[g.dir];
+              let gx = g.x + gv.x * (frightened ? g.speed * 0.8 : g.speed);
+              let gy = g.y + gv.y * (frightened ? g.speed * 0.8 : g.speed);
+              if (canMove(gx, gy)) {
+                g.x = wrapX(gx);
+                g.y = gy;
+              }
+            }
+          }
+
+          // Collisions
+          for (const g of st.ghosts) {
+            const d2 = Math.hypot(g.x - p.x, g.y - p.y);
+            if (d2 < TILE * 0.5) {
+              if (frightened && !g.eaten) {
+                g.eaten = true;
+                setScore((s) => s + 200);
+              } else if (!frightened && !g.eaten) {
+                endLevel(false);
+                break;
+              }
+            }
+          }
+
+          // Win check
+          if (countPelletsLeft() === 0) {
+            endLevel(true);
+          }
+
+          // Render
+          drawMaze(ctx);
+          // pellets
+          for (let r = 0; r < ROWS; r++) {
+            for (let c = 0; c < COLS; c++) {
+              const x = c * TILE + TILE / 2;
+              const y = r * TILE + TILE / 2;
+              if (GRID[r][c] === 1) {
+                ctx.fillStyle = COLORS.pellet;
+                ctx.beginPath();
+                ctx.arc(x, y, 3.2, 0, Math.PI * 2);
+                ctx.fill();
+              } else if (GRID[r][c] === 3) {
+                ctx.fillStyle = COLORS.powerPellet;
+                ctx.beginPath();
+                ctx.arc(x, y, 6, 0, Math.PI * 2);
+                ctx.fill();
+              }
+            }
+          }
+
+          // entities
+          drawPacman(ctx, st.pac.x, st.pac.y, TILE - 4, st.pac.dir, st.t);
+          for (const g of st.ghosts) {
+            drawGhost(ctx, g.x, g.y, TILE - 6, g.color, performance.now() < st.frightenedUntil && !g.eaten);
+          }
+
+          raf = requestAnimationFrame(loop);
+        }
+
+        function endLevel(won) {
+          setLevelOver(true);
+          setRunning(false);
+          setMessage(won ? "You cleared the level!" : "A ghost got you!" );
+          // Save score
+          const entry = { name: playerName || "Anonymous", score, date: new Date().toISOString() };
+          setScores((arr) => {
+            const next = [...arr, entry].sort((a, b) => b.score - a.score).slice(0, 50);
+            return next;
+          });
+        }
+
+        raf = requestAnimationFrame(loop);
+        return () => cancelAnimationFrame(raf);
+      }, [running, levelOver, playerName, score, setScores]);
+
+      function resetLevel() {
+        // reset GRID pellets from LEVEL
+        for (let r = 0; r < ROWS; r++) {
+          for (let c = 0; c < COLS; c++) {
+            GRID[r][c] = parseInt(LEVEL[r][c], 10);
+          }
+        }
+        stateRef.current.pac = {
+          x: 10 * TILE + TILE / 2,
+          y: 20 * TILE + TILE / 2,
+          dir: "left",
+          nextDir: "left",
+          speed: 2,
+        };
+        stateRef.current.ghosts = GHOSTS_DEF.map((g, i) => ({
+          ...g,
+          x: g.home.c * TILE + TILE / 2,
+          y: g.home.r * TILE + TILE / 2,
+          dir: i % 2 === 0 ? "left" : "right",
+          speed: 1.6,
+          eaten: false,
+        }));
+        stateRef.current.frightenedUntil = 0;
+        setScore(0);
+        setLevelOver(false);
+        setMessage("");
+        setRunning(true);
+      }
+
+      function handleSetName(e) {
+        e.preventDefault();
+        const form = new FormData(e.currentTarget);
+        const name = (form.get("name") || "").toString().trim().slice(0, 24);
+        if (name.length) {
+          setPlayerName(name);
+          setShowNameModal(false);
+        }
+      }
+
+      function clearScores() {
+        if (confirm("Clear all saved scores?")) setScores([]);
+      }
+
+      return (
+        <div className="min-h-screen w-full text-gray-800 flex flex-col items-center py-6 px-4" style={{ backgroundColor: COLORS.bg }}>
+          {/* Header */}
+          <div className="w-full max-w-5xl flex flex-col gap-3 items-center">
+            <h1 className="text-3xl md:text-4xl font-bold drop-shadow-sm text-gray-900">Ghibli-Style Pac Adventure</h1>
+            <p className="text-sm text-gray-600">Use arrow keys to move • Eat pellets • Power berries let you chomp ghosts • Press Space to pause</p>
+          </div>
+
+          {/* HUD */}
+          <div className="w-full max-w-5xl mt-4 grid grid-cols-1 md:grid-cols-3 gap-3 items-center">
+            <div className="bg-white/80 rounded-2xl shadow p-3 flex items-center justify-center border border-gray-200">
+              <span className="text-sm font-medium mr-2">Player:</span>
+              <span className="font-semibold">{playerName || "—"}</span>
+              <button
+                className="ml-3 text-xs px-2 py-1 rounded-xl border border-gray-300 hover:bg-gray-50"
+                onClick={() => setShowNameModal(true)}
+              >Change</button>
+            </div>
+            <div className="bg-white/80 rounded-2xl shadow p-3 flex items-center justify-center border border-gray-200">
+              <span className="text-sm font-medium mr-2">Score:</span>
+              <span className="font-semibold text-lg">{score}</span>
+            </div>
+            <div className="bg-white/80 rounded-2xl shadow p-3 flex items-center justify-center gap-2 border border-gray-200">
+              <button
+                className="px-3 py-2 rounded-xl shadow-sm border border-gray-300 hover:bg-gray-50"
+                onClick={() => setRunning((r) => !r)}
+              >{running ? "Pause" : "Resume"}</button>
+              <button
+                className="px-3 py-2 rounded-xl shadow-sm border border-gray-300 hover:bg-gray-50"
+                onClick={resetLevel}
+              >Restart Level</button>
+            </div>
+          </div>
+
+          {/* Game Stage */}
+          <div className="mt-5 bg-white rounded-3xl shadow-xl p-4 border border-gray-200">
+            <canvas
+              ref={canvasRef}
+              width={CANVAS_W}
+              height={CANVAS_H}
+              className="rounded-2xl block"
+            />
+          </div>
+
+          {/* Scores */}
+          <div className="w-full max-w-5xl mt-6 bg-white/80 rounded-2xl shadow p-4 border border-gray-200">
+            <div className="flex items-center justify-between">
+              <h2 className="text-xl font-semibold">Scoreboard</h2>
+              <button className="text-xs px-2 py-1 rounded-xl border border-gray-300 hover:bg-gray-50" onClick={clearScores}>Clear</button>
+            </div>
+            <div className="mt-3 overflow-x-auto">
+              <table className="min-w-full text-sm">
+                <thead>
+                  <tr className="text-left text-gray-600">
+                    <th className="py-2 pr-3">#</th>
+                    <th className="py-2 pr-3">Name</th>
+                    <th className="py-2 pr-3">Score</th>
+                    <th className="py-2 pr-3">Date</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {scores.length === 0 && (
+                    <tr><td colSpan={4} className="py-3 text-gray-500">No scores yet. Be the first!</td></tr>
+                  )}
+                  {scores.map((s, i) => (
+                    <tr key={i} className="border-t border-gray-100">
+                      <td className="py-2 pr-3">{i + 1}</td>
+                      <td className="py-2 pr-3 font-medium">{s.name}</td>
+                      <td className="py-2 pr-3">{s.score}</td>
+                      <td className="py-2 pr-3 text-gray-500">{new Date(s.date).toLocaleString()}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          {/* Overlay message */}
+          {levelOver && (
+            <div className="fixed inset-0 bg-black/30 backdrop-blur-sm flex items-center justify-center">
+              <div className="bg-white rounded-3xl p-6 shadow-xl border border-gray-200 w-[min(92vw,420px)] text-center">
+                <h3 className="text-2xl font-bold mb-2">{message}</h3>
+                <p className="text-gray-600 mb-4">Your score: <span className="font-semibold">{score}</span></p>
+                <div className="flex gap-2 justify-center">
+                  <button className="px-3 py-2 rounded-xl shadow-sm border border-gray-300 hover:bg-gray-50" onClick={resetLevel}>Play Again</button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Name modal */}
+          {showNameModal && (
+            <div className="fixed inset-0 bg-black/30 backdrop-blur-sm flex items-center justify-center">
+              <form onSubmit={handleSetName} className="bg-white rounded-3xl p-6 shadow-xl border border-gray-200 w-[min(92vw,420px)]">
+                <h3 className="text-xl font-semibold mb-2">Welcome!</h3>
+                <p className="text-sm text-gray-600 mb-4">Enter your name to join the scoreboard.</p>
+                <input
+                  name="name"
+                  defaultValue={playerName}
+                  maxLength={24}
+                  autoFocus
+                  placeholder="Your name"
+                  className="w-full px-3 py-2 rounded-xl border border-gray-300 focus:outline-none focus:ring focus:ring-blue-200"
+                />
+                <div className="mt-4 flex gap-2 justify-end">
+                  <button type="button" className="px-3 py-2 rounded-xl border border-gray-300 hover:bg-gray-50" onClick={() => setShowNameModal(false)}>Cancel</button>
+                  <button type="submit" className="px-3 py-2 rounded-xl bg-blue-600 text-white shadow hover:opacity-90">Save</button>
+                </div>
+              </form>
+            </div>
+          )}
+
+          <footer className="mt-8 text-xs text-gray-500">Original code & graphics. Inspired by cozy Ghibli vibes — not affiliated with Studio Ghibli.</footer>
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>
